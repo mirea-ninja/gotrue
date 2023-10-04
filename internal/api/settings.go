@@ -17,6 +17,7 @@ type ProviderSettings struct {
 	Kakao        bool `json:"kakao"`
 	Linkedin     bool `json:"linkedin"`
 	LinkedinOIDC bool `json:"linkedin_oidc"`
+	Mirea        bool `json:"mirea"`
 	Notion       bool `json:"notion"`
 	Spotify      bool `json:"spotify"`
 	Slack        bool `json:"slack"`
@@ -57,6 +58,7 @@ func (a *API) Settings(w http.ResponseWriter, r *http.Request) error {
 			Keycloak:     config.External.Keycloak.Enabled,
 			Linkedin:     config.External.Linkedin.Enabled,
 			LinkedinOIDC: config.External.LinkedinOIDC.Enabled,
+			Mirea:        config.External.Mirea.Enabled,
 			Notion:       config.External.Notion.Enabled,
 			Spotify:      config.External.Spotify.Enabled,
 			Slack:        config.External.Slack.Enabled,
