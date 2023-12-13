@@ -11,17 +11,12 @@ import (
 	"time"
 
 	"github.com/sethvargo/go-password/password"
-	"github.com/supabase/gotrue/internal/api/sms_provider"
-	"github.com/supabase/gotrue/internal/crypto"
-	"github.com/supabase/gotrue/internal/models"
-	"github.com/supabase/gotrue/internal/observability"
-	"github.com/supabase/gotrue/internal/storage"
-	"github.com/supabase/gotrue/internal/utilities"
-)
-
-var (
-	// indicates that a user should be redirected due to an error
-	errRedirectWithQuery = errors.New("redirect user")
+	"github.com/supabase/auth/internal/api/sms_provider"
+	"github.com/supabase/auth/internal/crypto"
+	"github.com/supabase/auth/internal/models"
+	"github.com/supabase/auth/internal/observability"
+	"github.com/supabase/auth/internal/storage"
+	"github.com/supabase/auth/internal/utilities"
 )
 
 const (
@@ -138,6 +133,9 @@ func (a *API) verifyGet(w http.ResponseWriter, r *http.Request, params *VerifyPa
 		token       *AccessTokenResponse
 		authCode    string
 	)
+
+	grantParams.FillGrantParams(r)
+
 	flowType := models.ImplicitFlow
 	var authenticationMethod models.AuthenticationMethod
 	if strings.HasPrefix(params.Token, PKCEPrefix) {
@@ -233,6 +231,8 @@ func (a *API) verifyPost(w http.ResponseWriter, r *http.Request, params *VerifyP
 	)
 	var isSingleConfirmationResponse = false
 
+	grantParams.FillGrantParams(r)
+
 	err := db.Transaction(func(tx *storage.Connection) error {
 		var terr error
 		aud := a.requestAud(ctx, r)
@@ -291,19 +291,24 @@ func (a *API) verifyPost(w http.ResponseWriter, r *http.Request, params *VerifyP
 func (a *API) signupVerify(r *http.Request, ctx context.Context, conn *storage.Connection, user *models.User) (*models.User, error) {
 	config := a.config
 
+	if user.EncryptedPassword == "" && user.InvitedAt != nil {
+		// sign them up with temporary password, and require application
+		// to present the user with a password set form
+		password, err := password.Generate(64, 10, 0, false, true)
+		if err != nil {
+			return nil, err
+		}
+
+		if err := user.SetPassword(ctx, password); err != nil {
+			return nil, err
+		}
+	}
+
 	err := conn.Transaction(func(tx *storage.Connection) error {
 		var terr error
-		if user.EncryptedPassword == "" {
-			if user.InvitedAt != nil {
-				// sign them up with temporary password, and require application
-				// to present the user with a password set form
-				password, err := password.Generate(64, 10, 0, false, true)
-				if err != nil {
-					internalServerError("error creating user").WithInternalError(err)
-				}
-				if terr = user.UpdatePassword(tx, password, nil); terr != nil {
-					return internalServerError("Error storing password").WithInternalError(terr)
-				}
+		if user.EncryptedPassword == "" && user.InvitedAt != nil {
+			if terr = user.UpdatePassword(tx, nil); terr != nil {
+				return internalServerError("Error storing password").WithInternalError(terr)
 			}
 		}
 
@@ -415,8 +420,10 @@ func (a *API) prepErrorRedirectURL(err *HTTPError, w http.ResponseWriter, r *htt
 	q.Set("error_code", strconv.Itoa(err.Code))
 	q.Set("error_description", err.Message)
 	if flowType == models.PKCEFlow {
+		// Additionally, may override existing error query param if set to PKCE.
 		u.RawQuery = q.Encode()
 	}
+	// Left as hash fragment to comply with spec.
 	u.Fragment = hq.Encode()
 	return u.String(), nil
 }
@@ -515,13 +522,13 @@ func (a *API) verifyTokenHash(ctx context.Context, conn *storage.Connection, par
 
 	if err != nil {
 		if models.IsNotFoundError(err) {
-			return nil, expiredTokenError("Email link is invalid or has expired").WithInternalError(errRedirectWithQuery)
+			return nil, expiredTokenError("Email link is invalid or has expired").WithInternalError(err)
 		}
 		return nil, internalServerError("Database error finding user from email link").WithInternalError(err)
 	}
 
 	if user.IsBanned() {
-		return nil, unauthorizedError("Error confirming user").WithInternalError(errRedirectWithQuery)
+		return nil, unauthorizedError("Error confirming user").WithInternalMessage("user is banned")
 	}
 
 	var isExpired bool
@@ -543,7 +550,7 @@ func (a *API) verifyTokenHash(ctx context.Context, conn *storage.Connection, par
 	}
 
 	if isExpired {
-		return nil, expiredTokenError("Email link is invalid or has expired").WithInternalError(errRedirectWithQuery)
+		return nil, expiredTokenError("Email link is invalid or has expired").WithInternalMessage("email link has expired")
 	}
 
 	return user, nil
@@ -563,6 +570,8 @@ func (a *API) verifyUserAndToken(ctx context.Context, conn *storage.Connection, 
 	case smsVerification:
 		user, err = models.FindUserByPhoneAndAudience(conn, params.Phone, aud)
 	case emailChangeVerification:
+		// Since the email change could be trigger via the implicit or PKCE flow,
+		// the query used has to also check if the token saved in the db contains the pkce_ prefix
 		user, err = models.FindUserForEmailChange(conn, params.Email, tokenHash, aud, config.Mailer.SecureEmailChangeEnabled)
 	default:
 		user, err = models.FindUserByEmailAndAudience(conn, params.Email, aud)
@@ -570,13 +579,13 @@ func (a *API) verifyUserAndToken(ctx context.Context, conn *storage.Connection, 
 
 	if err != nil {
 		if models.IsNotFoundError(err) {
-			return nil, notFoundError(err.Error()).WithInternalError(errRedirectWithQuery)
+			return nil, notFoundError(err.Error()).WithInternalError(err)
 		}
 		return nil, internalServerError("Database error finding user").WithInternalError(err)
 	}
 
 	if user.IsBanned() {
-		return nil, unauthorizedError("Error confirming user").WithInternalError(errRedirectWithQuery)
+		return nil, unauthorizedError("Error confirming user").WithInternalMessage("user is banned")
 	}
 
 	var isValid bool
@@ -624,8 +633,8 @@ func (a *API) verifyUserAndToken(ctx context.Context, conn *storage.Connection, 
 		isValid = isOtpValid(tokenHash, expectedToken, sentAt, config.Sms.OtpExp)
 	}
 
-	if !isValid || err != nil {
-		return nil, expiredTokenError("Token has expired or is invalid").WithInternalError(errRedirectWithQuery)
+	if !isValid {
+		return nil, expiredTokenError("Token has expired or is invalid").WithInternalMessage("token has expired or is invalid")
 	}
 	return user, nil
 }

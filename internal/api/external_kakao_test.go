@@ -10,8 +10,8 @@ import (
 
 	jwt "github.com/golang-jwt/jwt"
 	"github.com/stretchr/testify/require"
-	"github.com/supabase/gotrue/internal/api/provider"
-	"github.com/supabase/gotrue/internal/models"
+	"github.com/supabase/auth/internal/api/provider"
+	"github.com/supabase/auth/internal/models"
 )
 
 func (ts *ExternalTestSuite) TestSignupExternalKakao() {
@@ -197,6 +197,7 @@ func (ts *ExternalTestSuite) TestInviteTokenExternalKakaoErrorWhenEmailDoesntMat
 }
 
 func (ts *ExternalTestSuite) TestSignupExternalKakaoErrorWhenVerifiedFalse() {
+	ts.Config.Mailer.AllowUnverifiedEmailSignIns = false
 	tokenCount, userCount := 0, 0
 	code := "authcode"
 	emails := `[{"email":"kakao@example.com", "primary": true, "verified": false}]`
@@ -205,12 +206,7 @@ func (ts *ExternalTestSuite) TestSignupExternalKakaoErrorWhenVerifiedFalse() {
 
 	u := performAuthorization(ts, "kakao", code, "")
 
-	v, err := url.ParseQuery(u.Fragment)
-	ts.Require().NoError(err)
-	ts.Equal("unauthorized_client", v.Get("error"))
-	ts.Equal("401", v.Get("error_code"))
-	ts.Equal("Unverified email with kakao", v.Get("error_description"))
-	assertAuthorizationFailure(ts, u, "", "", "")
+	assertAuthorizationFailure(ts, u, "Unverified email with kakao. A confirmation email has been sent to your kakao email", "unauthorized_client", "")
 }
 
 func (ts *ExternalTestSuite) TestSignupExternalKakaoErrorWhenUserBanned() {
